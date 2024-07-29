@@ -39,7 +39,7 @@ use surrealdb::opt::auth::Root;
 
 static APP_CONFIG: Lazy<AppConfig> = Lazy::new(|| AppConfig::init());
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> std::io::Result<()> {
     std::env::set_var("RUST_LOG", "info");
     std::env::set_var("RUST_BACKTRACE", "1");
@@ -56,7 +56,7 @@ async fn main() -> std::io::Result<()> {
         database,
         credentials: Root { username, password },
     };
-    let db = DB::connect("127.0.0.1:8000", &conn_opts)
+    let db = DB::connect("0.0.0.0:8000", &conn_opts)
         .await
         .unwrap_or_else(|err| {
             log::error!("Error Connecting To SurrealDB");
@@ -88,6 +88,7 @@ async fn main() -> std::io::Result<()> {
     .bind(("127.0.0.1", 8080))?
     .run()
     .await?;
-
     Ok(())
 }
+
+

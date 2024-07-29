@@ -5,8 +5,6 @@ use totp_rs::{Algorithm, Secret, TOTP};
 use serde::Deserialize;
 use rand::Rng;
 use base32;
-use reqwest::Client;
-use std::env;
 use chrono::{Duration, Utc};
 use lettre::message::{header, SinglePart};
 use lettre::{Message, SmtpTransport, Transport};
@@ -45,8 +43,8 @@ pub async fn health_checker_handler() -> impl Responder {
 
 pub async fn send_email_smtp(to: &str, otp: &str) -> Result<(), Box<dyn std::error::Error>> {
     let email = Message::builder()
-        .from("xps.universe@gmail.com".parse()?)
-        .reply_to("xps.universe@gmail.com".parse()?)
+        .from("XP <xps.universe@gmail.com>".parse()?)
+        .reply_to("XP <xps.universe@gmail.com>".parse()?)
         .to(to.parse()?)
         .subject("Verify your Email Address")
         .singlepart(
@@ -57,11 +55,12 @@ pub async fn send_email_smtp(to: &str, otp: &str) -> Result<(), Box<dyn std::err
 
     let creds = Credentials::new("xps.universe@gmail.com".to_string(), "ngmr halg tdss ynwe".to_string());
 
-    let mailer = SmtpTransport::relay("smtp.example.com")?
+    let mailer = SmtpTransport::relay("smtp.gmail.com")?
         .credentials(creds)
         .build();
 
-    mailer.send(&email)?;
+    // Send the mail    
+    mailer.send(&email).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     Ok(())
 }
@@ -81,7 +80,7 @@ pub async fn register(
         // Generate OTP
         let mut rng = rand::thread_rng();
         let data_byte: [u8; 21] = rng.gen();
-        let base32_string = base32::encode(base32::Alphabet::RFC4648 { padding: false }, &data_byte);
+        let base32_string = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &data_byte);
     
         let totp = TOTP::new(
             Algorithm::SHA1,
@@ -111,26 +110,46 @@ pub async fn register(
     
         // Save to temporary storage (in-memory or separate DB table)
     // Save to temporary storage (in-memory or separate DB table)
-    let query = "INSERT INTO temporary_users (username, first_name, last_name, password, email_id, country, otp_enabled, otp_verified, otp_base32, otp_auth_url) 
-                 VALUES ($username, $first_name, $last_name, $password, $email_id, $country, $otp_enabled, $otp_verified, $otp_base32, $otp_auth_url)";
-    db.query(query)
-        .bind("username", &temp_user.username)
-        .bind("first_name", &temp_user.first_name)
-        .bind("last_name", &temp_user.last_name)
-        .bind("password", &temp_user.password)
-        .bind("email_id", &temp_user.email_id)
-        .bind("country", &temp_user.country)
-        .bind("otp_enabled", &temp_user.otp_enabled)
-        .bind("otp_verified", &temp_user.otp_verified)
-        .bind("otp_base32", &temp_user.otp_base32)
-        .bind("otp_auth_url", &temp_user.otp_auth_url)
-        .await
-        .unwrap();
+    let query = "
+    INSERT INTO temporary_users (
+        username, first_name, last_name, password, email_id, 
+        country, otp_enabled, otp_verified, otp_base32, otp_auth_url
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+// Execute the query with bound parameters
+match db.query(query)
+    .bind(&temp_user.username)
+    .bind(&temp_user.first_name)
+    .bind(&temp_user.last_name)
+    .bind(&temp_user.password)
+    .bind(&temp_user.email_id)
+    .bind(&temp_user.country)
+    .bind(&temp_user.otp_enabled)
+    .bind(&temp_user.otp_verified)
+    .bind(&temp_user.otp_base32)
+    .bind(&temp_user.otp_auth_url)
+    .await
+{
+    Ok(_) => {
+        // Handle success
+        println!("User temporarily registered successfully.");
+    }
+    Err(e) => {
+        // Handle error
+        eprintln!("Error executing query: {:?}", e);
+    }
+}
     
-        // Send OTP to user via email
-        send_email_smtp(&email_id, &otp_base32);
+    // Send OTP to user via email
+    if let Err(e) = send_email_smtp(&email_id, &otp_base32).await {
+        let json_error = GenericResponse {
+            status: "fail".to_string(),
+            message: format!("Error sending OTP email: {}", e),
+        };
+        return Ok(HttpResponse::InternalServerError().json(json_error));
+    }
     
-        HttpResponse::Ok().json(json!({"message": "OTP sent to your email"}))
+        Ok(HttpResponse::Ok().json(json!({"message": "OTP sent to your email"})))
 
     // let mut new_user: User = User {
     //     id: None,
@@ -170,28 +189,26 @@ pub async fn register(
 pub async fn verify_otp(
     body: web::Json<VerifyOTPSchema>,
     db: web::Data<Surreal<Client>>,
-) -> impl Responder {
+) -> Result<HttpResponse, AppError> {
     let email_id = body.email_id.clone();
     let otp = body.otp.clone();
 
     // Retrieve temporary user
     let temp_user: Option<TemporaryUser> = db
-        .query("SELECT * FROM temporary_users WHERE email_id = $email_id")
-        .bind("email_id", &email_id)
-        .await.unwrap()
+        .query("SELECT * FROM temporary_users WHERE email_id = ?")
+        .bind(&email_id)
+        .await?
         .take(0)?;
 
     if let Some(user) = temp_user {
         let otp_timestamp = user.otp_timestamp;
 
         // Check if the OTP is expired
-        if Utc::now().signed_duration_since(otp_timestamp) > Duration::minutes(10) {
-            let json_error = GenericResponse {
+        if chrono::Utc::now().signed_duration_since(otp_timestamp) > Duration::minutes(10) {
+            return Ok(HttpResponse::Forbidden().json(GenericResponse {
                 status: "fail".to_string(),
                 message: "OTP is expired".to_string(),
-            };
-
-            return HttpResponse::Forbidden().json(json_error);
+            }));
         }
 
         // Validate OTP
@@ -207,7 +224,7 @@ pub async fn verify_otp(
 
         if is_valid {
             // Move user from temporary storage to main user table
-            let new_user = User {
+            let mut new_user = User {
                 id: None,
                 username: user.username,
                 first_name: user.first_name,
@@ -224,60 +241,55 @@ pub async fn verify_otp(
                 created_at: chrono::Utc::now().into(),
             };
 
-            new_user.create(&db).await?;
+            if let Err(e) = new_user.create(&db).await {
+                let json_error = GenericResponse {
+                    status: "fail".to_string(),
+                    message: format!("Error creating new user: {}", e),
+                };
+                return Ok(HttpResponse::InternalServerError().json(json_error));
+            }
 
             // Delete temporary user
-            db.query("DELETE FROM temporary_users WHERE email_id = $email_id")
-                .bind("email_id", &email_id)
-                .await.unwrap();
+            db.query("DELETE FROM temporary_users WHERE email_id = ?")
+                .bind(&email_id)
+                .await?;
 
-            return HttpResponse::Ok().json(json!({"message": "User registered successfully"}));
+            return Ok(HttpResponse::Ok().json(json!({"message": "User registered successfully"})));
         } else {
-            return HttpResponse::Forbidden().json(json!({"message": "Invalid OTP"}));
+            return Ok(HttpResponse::Forbidden().json(json!({"message": "Invalid OTP"})));
         }
     }
 
-    HttpResponse::NotFound().json(json!({"message": "User not found"}))
+    Ok(HttpResponse::NotFound().json(json!({"message": "User not found"})))
 }
-
-
 
 pub async fn validate_otp_handler(
     body: web::Json<VerifyOTPSchema>,
     db: web::Data<Surreal<Client>>,
-) -> impl Responder {
-    let user_id = body.user_id.clone();
+) -> Result<HttpResponse, AppError> {
+    let email_id = body.email_id.clone();
 
     // Fetch user from the database
     let user: Option<User> = db
-        .query("SELECT * FROM user WHERE id = $user_id")
-        .bind("user_id", &user_id)
-        .await
-        .map_err(|e| {
-            let json_error = GenericResponse {
-                status: "fail".to_string(),
-                message: format!("Error querying user: {}", e),
-            };
-            HttpResponse::InternalServerError().json(json_error)
-        })?
+        .query("SELECT * FROM user WHERE id = ?")
+        .bind(&email_id)
+        .await?
         .take(0)?;
 
     if user.is_none() {
-        let json_error = GenericResponse {
+        return Ok(HttpResponse::NotFound().json(GenericResponse {
             status: "fail".to_string(),
-            message: format!("No user with Id: {} found", body.user_id),
-        };
-        return HttpResponse::NotFound().json(json_error);
+            message: format!("No user with Id: {} found", body.email_id),
+        }));
     }
 
     let user = user.unwrap();
 
-    if !user.otp_enabled.unwrap() {
-        let json_error = GenericResponse {
+    if !user.otp_enabled.unwrap_or(false) {
+        return Ok(HttpResponse::Forbidden().json(GenericResponse {
             status: "fail".to_string(),
             message: "2FA not enabled".to_string(),
-        };
-        return HttpResponse::Forbidden().json(json_error);
+        }));
     }
 
     let otp_base32 = user.otp_base32.to_owned().unwrap();
@@ -291,12 +303,16 @@ pub async fn validate_otp_handler(
     )
     .unwrap();
 
-    let is_valid = totp.check_current(&body.token).unwrap();
+    let is_valid = totp.check_current(&body.otp).unwrap();
 
     if !is_valid {
-        return HttpResponse::Forbidden()
-            .json(json!({"status": "fail", "message": "Token is invalid or user doesn't exist"}));
+        return Ok(HttpResponse::Forbidden().json(json!({
+            "status": "fail",
+            "message": "Token is invalid or user doesn't exist"
+        })));
     }
 
-    HttpResponse::Ok().json(json!({"otp_valid": true}))
+    Ok(HttpResponse::Ok().json(json!({"otp_valid": true})))
 }
+
+

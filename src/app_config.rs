@@ -55,8 +55,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
     let auth = web::scope("/auth")
         .service(web::resource("/login").route(web::post().to(signin::login)))
         .service(web::resource("/register").route(web::post().to(signup::register)))
-        .service(web::resource("/generateotp").route(web::post().to(signup::generate_otp_handler)))
-        .service(web::resource("/verifyotp").route(web::post().to(signup::verify_otp_handler)))
+        .service(web::resource("/verify_otp").route(web::post().to(signup::verify_otp)))
         .service(web::resource("/validateotp").route(web::post().to(signup::validate_otp_handler)));
 
 
